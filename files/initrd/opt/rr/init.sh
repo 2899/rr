@@ -23,6 +23,16 @@ fi
 [ -z "${LOADER_DISK}" ] && die "$(TEXT "Loader is not init!")"
 checkBootLoader || die "$(TEXT "The loader is corrupted, please rewrite it!")"
 
+mkdir -p "${CKS_PATH}"
+mkdir -p "${LKMS_PATH}"
+mkdir -p "${ADDONS_PATH}"
+mkdir -p "${MODULES_PATH}"
+
+# # for DSM 7.4 temporary countermeasures
+# for I in "${LKMS_PATH}"/* "${MODULES_PATH}"/* "${CKS_PATH}"/*; do
+#   echo "${I}" | grep -Eq -- "-7\.3-" && [ ! -f "${I/-7.3-/-7.4-}" ] && ln -sf "${I}" "${I/-7.3-/-7.4-}" || true
+# done
+
 # Shows title
 clear
 COLUMNS=$(ttysize 2>/dev/null | awk '{print $1}')
@@ -86,6 +96,7 @@ if [ -z "$(readConfigMap "addons" "${USER_CONFIG_FILE}")" ]; then
   initConfigKey "addons.trivial" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.vmtools" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.monitor" "" "${USER_CONFIG_FILE}"
+  initConfigKey "addons.diskcompat" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.mountloader" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.powersched" "" "${USER_CONFIG_FILE}"
   initConfigKey "addons.reboottoloader" "" "${USER_CONFIG_FILE}"
@@ -110,9 +121,16 @@ if [ ! -f "/.dockerenv" ]; then
       if [ -n "${IPRA[2]}" ]; then
         ip route add default via "${IPRA[2]}" dev "${N}" 2>/dev/null || true
       fi
-      if [ -n "${IPRA[3]:-${IPRA[2]}}" ]; then
-        sed -i "/nameserver ${IPRA[3]:-${IPRA[2]}}/d" /etc/resolv.conf
-        echo "nameserver ${IPRA[3]:-${IPRA[2]}}" >>/etc/resolv.conf
+      DNSSRV="${IPRA[3]:-${IPRA[2]:-}}"
+      if [ -n "${DNSSRV}" ]; then
+        # With a static address udhcpc never runs, so /etc/resolv.conf may not exist
+        # yet. 'sed -i' on a missing file exits 2 and the 'set -e' above would abort
+        # the rest of the boot. Anchor the whole nameserver line so that deleting
+        # 192.168.1.1 does not also drop 192.168.1.100, and escape the dots with
+        # four backslashes: bash reduces "\\." in a replacement back to a bare dot.
+        touch /etc/resolv.conf 2>/dev/null || true
+        sed -i -E "/^[[:space:]]*nameserver[[:space:]]+${DNSSRV//./\\\\.}[[:space:]]*$/d" /etc/resolv.conf 2>/dev/null || true
+        echo "nameserver ${DNSSRV}" >>/etc/resolv.conf 2>/dev/null || true
       fi
       sleep 1
     fi
@@ -172,8 +190,8 @@ if dsmIsUpgraded; then
   # Check if DSM buildnumber changed
   . "${RAMDISK_PATH}/etc/VERSION"
 
-  if [ -n "${PRODUCTVER}" ] && [ -n "${BUILDNUM}" ] && [ -n "${SMALLNUM}" ] &&
-    ([ ! "${PRODUCTVER}" = "${majorversion:-0}.${minorversion:-0}" ] || [ ! "${BUILDNUM}" = "${buildnumber:-0}" ] || [ ! "${SMALLNUM}" = "${smallfixnumber:-0}" ]); then
+  if [ -n "${PRODUCTVER}" ] && [ -n "${BUILDNUM}" ] && [ -n "${SMALLNUM}" ] \
+    && ([ ! "${PRODUCTVER}" = "${majorversion:-0}.${minorversion:-0}" ] || [ ! "${BUILDNUM}" = "${buildnumber:-0}" ] || [ ! "${SMALLNUM}" = "${smallfixnumber:-0}" ]); then
     OLDVER="${PRODUCTVER}(${BUILDNUM}$([ "${SMALLNUM:-0}" = "0" ] || echo "u${SMALLNUM:-0}"))"
     NEWVER="${majorversion:-0}.${minorversion:-0}(${buildnumber:-0}$([ "${smallfixnumber:-0}" = "0" ] || echo "u${smallfixnumber:-0}"))"
     echo -e "\033[A\n\033[1;32mBuild number changed from \033[1;31m${OLDVER}\033[1;32m to \033[1;31m${NEWVER}\033[0m"
@@ -317,10 +335,8 @@ RAM="$(awk '/MemTotal:/ {printf "%.0f", $2 / 1024}' /proc/meminfo 2>/dev/null)"
 if [ "${RAM:-0}" -le 3500 ]; then
   printf "\033[1;33m%s\033[0m\n" "$(TEXT "You have less than 4GB of RAM, if errors occur in loader creation, please increase the amount of memory.")"
 fi
-
-mkdir -p "${CKS_PATH}"
-mkdir -p "${LKMS_PATH}"
-mkdir -p "${ADDONS_PATH}"
-mkdir -p "${MODULES_PATH}"
+if [ "${RAM:-0}" -le 7000 ]; then
+  mount -o remount,size=${RAM}M /tmp 2>/dev/null || true
+fi
 
 exit 0

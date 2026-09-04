@@ -77,7 +77,7 @@ jobs:
 
       - name: Update Comment Warinfo
         if: env.warinfo == 'true'
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: "create-comment"
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -123,7 +123,7 @@ jobs:
 
       - name: Update Comment Labels
         if: env.iscustom == 'true'
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: 'add-labels'
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -133,7 +133,7 @@ jobs:
       - name: Update Comment Building
         if: env.iscustom == 'true'
         id: comment
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: 'create-comment'
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -152,7 +152,7 @@ jobs:
 
           sudo apt update
           sudo apt install -y locales busybox dialog gettext sed gawk jq curl
-          sudo apt install -y python-is-python3 python3-pip libelf-dev qemu-utils dosfstools cpio xz-utils lz4 lzma bzip2 gzip zstd
+          sudo apt install -y python-is-python3 python3-pip libelf-dev qemu-utils parted dosfstools cpio xz-utils lz4 lzma bzip2 gzip zstd
 
           . scripts/func.sh "${{ secrets.RRORG }}"
 
@@ -207,6 +207,7 @@ jobs:
             }
             echo "menu.sh make"
             echo "menu.sh cleanCache"
+            [ "2GB" = "${{ env.size }}" ] && echo "menu.sh onePlatform"
             [ -n "${{ env.sn }}" ] && echo "writeConfigKey \"sn\" \"${{ env.sn }}\" \"\${USER_CONFIG_FILE}\""
             [ -n "${{ env.macs }}" ] && {
               MACS=($(echo "${{ env.macs }}" | sed 's/[:-]//g' | sed 's/.*/\U&/' | sed 's/[;,]/ /g'))
@@ -303,7 +304,7 @@ jobs:
 
       - name: Upload to Artifacts
         if: env.iscustom == 'true' && success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rr-${{ env.model }}-${{ env.TAG }}
           path: |
@@ -312,7 +313,7 @@ jobs:
 
       - name: Update Comment Success
         if: env.iscustom == 'true' && success()
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: 'update-comment'
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -327,7 +328,7 @@ jobs:
 
       - name: Update Comment Fail
         if: env.iscustom == 'true' && failure()
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: 'update-comment'
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -342,7 +343,7 @@ jobs:
 
       - name: Close Issues
         if: env.iscustom == 'true'
-        uses: actions-cool/issues-helper@v3
+        uses: actions-cool/issues-helper-backup@d65454423c6fbbd20026b9b499d403f79422ac69
         with:
           actions: 'close-issue'
           token: ${{ secrets.GITHUB_TOKEN }}

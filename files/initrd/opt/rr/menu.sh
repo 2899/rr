@@ -174,7 +174,7 @@ function modelMenu() {
     --infobox "$(TEXT "Getting models ...")" 0 0
 
   rm -f "${TMP_PATH}/modellist"
-  PS="$(readConfigEntriesArray "platforms" "${WORK_PATH}/platforms.yml" | sort)"
+  PS="$(_get_platform)"
   MJ="$(python3 ${WORK_PATH}/include/functions.py getmodels -p "${PS[*]}")"
 
   if [ "${MJ:-"[]"}" = "[]" ]; then
@@ -189,9 +189,9 @@ function modelMenu() {
   while true; do
     rm -f "${TMP_PATH}/menu"
     FLGNEX=0
-    IGPU1L=(apollolake geminilake epyc7002 geminilakenk r1000nk v1000nk)
-    IGPU2L=(epyc7002 geminilakenk r1000nk v1000nk)
-    KVER5L=(epyc7002 geminilakenk r1000nk v1000nk)
+    IGPU1L=(apollolake geminilake)
+    IGPU2L=(epyc7002 epyc7003 epyc7003ntb geminilakenk icelaked r1000nk v1000nk)
+    KVER5L=(epyc7002 epyc7003 epyc7003ntb geminilakenk icelaked r1000nk v1000nk)
     IGPUID="$(lspci -nd ::300 2>/dev/null | grep "8086" | cut -d' ' -f3 | sed 's/://g')"
     NVMEMS=(DS918+ RS1619xs+ DS419+ DS1019+ DS719+ DS1621xs+)
     NVMEMD=$(find /sys/devices -type d -name nvme | awk -F'/' '{print NF}' | sort -n | tail -n1)
@@ -324,6 +324,13 @@ function productversMenu() {
     [ $? -ne 0 ] && return 0
   fi
 
+  if ! grep -qw "movbe" "/proc/cpuinfo" && awk "BEGIN {exit !($resp > 7.2)}"; then
+    MSG="$(printf "$(TEXT "The current version %s is not supported on this CPU. Do you want to continue?")" "${PRODUCTVER}")"
+    DIALOG --ret 0 --title "$(TEXT "Product Version")" \
+      --yesno "${MSG}" 0 0
+    [ $? -ne 0 ] && return 0
+  fi
+
   selver="${resp}"
   urlver=""
   paturl=""
@@ -368,7 +375,7 @@ function productversMenu() {
     [ -n "${2}" ] && [ -n "${3}" ] && VAL="${2}"$'\n'"${3}"
     DIALOG --err "${VAL}" --title "$(TEXT "Product Version")" \
       --extra-button --extra-label "$(TEXT "Retry")" \
-      --form "${MSG}" 10 110 2 "URL" 1 1 "${paturl}" 1 5 100 0 "MD5" 2 1 "${patsum}" 2 5 100 0 \
+      --form "${MSG}" 10 138 2 "URL" 1 1 "${paturl}" 1 5 128 0 "MD5" 2 1 "${patsum}" 2 5 128 0 \
       2>"${TMP_PATH}/resp"
     RET=$?
     case ${RET} in
@@ -491,8 +498,8 @@ function setConfigFromDSM() {
   VS="$(readConfigEntriesArray "platforms.${PLATFORMTMP,,}.productvers" "${WORK_PATH}/platforms.yml" | sort -r)"
   if arrayExistItem "${PLATFORMTMP,,}" ${PS} && arrayExistItem "${majorversion}.${minorversion}" ${VS}; then
     PLATFORM="${PLATFORMTMP,,}"
-    MODEL="$(echo "${MODELTMP}" | sed 's/d$/D/; s/rp$/RP/; s/rp+/RP+/')"
-    MODELID="${MODELTMP}"
+    MODEL="$(echo "${MODELTMP}" | sed 's/^ds/DS/; s/^fs/FS/; s/^rs/RS/; s/^sa/SA/; s/^dva/DVA/; s/d$/D/; s/rp$/RP/; s/rp+$/RP+/')"
+    MODELID=""
     PRODUCTVER="${majorversion}.${minorversion}"
     BUILDNUM="${buildnumber}"
     SMALLNUM="${smallfixnumber}"
@@ -1272,11 +1279,13 @@ function synoinfoMenu() {
 # Extract linux and ramdisk files from the DSM .pat
 function getSynoExtractor() {
   rm -f "${LOG_FILE}"
-  mirrors=("global.download.synology.com" "global.synologydownload.com" "cndl.synology.cn")
+  mirrors=("global.synologydownload.com" "global.download.synology.com" "cndl.synology.cn")
   fastest=$(_get_fastest "${mirrors[@]}")
   if [ $? -ne 0 ]; then
     echo -e "$(TEXT "The current network status is unknown, using the default mirror.")"
   fi
+  # _get_fastest echoes the first mirror when every measurement fails, so fastest is
+  # always a usable host and needs no further guard here.
   OLDPAT_URL="https://${fastest}/download/DSM/release/7.0.1/42218/DSM_DS3622xs%2B_42218.pat"
   OLDPAT_PATH="${TMP_PATH}/DS3622xs+-42218.pat"
   EXTRACTOR_PATH="${PART3_PATH}/extractor"
@@ -1415,13 +1424,17 @@ function extractDsmFiles() {
       CLEARCACHE=0
     fi
     mkdir -p "${PART3_PATH}/dl"
-    mirrors=("global.download.synology.com" "global.synologydownload.com" "cndl.synology.cn")
+    mirrors=("global.synologydownload.com" "global.download.synology.com" "cndl.synology.cn")
     fastest=$(_get_fastest "${mirrors[@]}")
-    if [ $? -ne 0 ]; then
+    FASTESTRC=$?
+    if [ ${FASTESTRC} -ne 0 ]; then
       echo -e "$(TEXT "The current network status is unknown, using the default mirror.")"
     fi
     mirror="$(echo "${PATURL}" | sed 's|^http[s]*://\([^/]*\).*|\1|')"
-    if echo "${mirrors[@]}" | grep -wq "${mirror}" && [ ! "${mirror}" = "${fastest}" ]; then
+    # Only switch mirrors when a latency measurement actually succeeded. When ICMP is
+    # blocked _get_fastest falls back to the first mirror in the list, and rewriting
+    # the url to it would move the download off the one mirror the user can reach.
+    if [ ${FASTESTRC} -eq 0 ] && echo "${mirrors[@]}" | grep -wq "${mirror}" && [ ! "${mirror}" = "${fastest}" ]; then
       printf "$(TEXT "Based on the current network situation, switch to %s mirror to downloading.\n")" "${fastest}"
       PATURL="$(echo "${PATURL}" | sed "s/${mirror}/${fastest}/")"
     fi
@@ -1819,11 +1832,11 @@ function formatDisks() {
     done
   fi
   for I in ${resp}; do
-    if [ "${I:0:8}" = "/dev/mmc" ]; then
-      echo y | mkfs.ext4 -T largefile4 -E nodiscard "${I}"
-    else
-      echo y | mkfs.ext4 -T largefile4 "${I}"
-    fi
+    # eMMC 不支持 discard, 用 nodiscard 避免 unmap 失败
+    case "${I}" in
+      /dev/mmc*) echo y | mkfs.ext4 -T largefile4 -E nodiscard "${I}" ;;
+      *) echo y | mkfs.ext4 -T largefile4 "${I}" ;;
+    esac
   done 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Formatting ...")" 20 100
   DIALOG --title "$(TEXT "Advanced")" \
@@ -1940,12 +1953,12 @@ function resetDSMPassword() {
     --no-items --menu "$(TEXT "Choose a user name")" 0 0 20 --file "${TMP_PATH}/menu" \
     2>"${TMP_PATH}/resp"
   [ $? -ne 0 ] && return 1
-  USER="$(cat "${TMP_PATH}/resp" 2>/dev/null | awk '{print $1}')"
-  [ -z "${USER}" ] && return 1
+  M_USER="$(cat "${TMP_PATH}/resp" 2>/dev/null | awk '{print $1}')"
+  [ -z "${M_USER}" ] && return 1
   local STRPASSWD
   while true; do
     DIALOG --title "$(TEXT "Advanced")" \
-      --inputbox "$(printf "$(TEXT "Type a new password for user '%s'")" "${USER}")" 0 70 "" \
+      --inputbox "$(printf "$(TEXT "Type a new password for user '%s'")" "${M_USER}")" 0 70 "" \
       2>"${TMP_PATH}/resp"
     [ $? -ne 0 ] && break 2
     resp="$(cat "${TMP_PATH}/resp" 2>/dev/null)"
@@ -1969,9 +1982,9 @@ function resetDSMPassword() {
       T="$(blkid -o value -s TYPE "${I}" 2>/dev/null | sed 's/linux_raid_member/ext4/')"
       mount -t "${T:-ext4}" "${I}" "${TMP_PATH}/mdX"
       [ $? -ne 0 ] && continue
-      sed -i "s|^${USER}:[^:]*|${USER}:${NEWPASSWD}|" "${TMP_PATH}/mdX/etc/shadow"
-      sed -i "/^${USER}:/ s/^\(${USER}:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\)[^:]*:/\1:/" "${TMP_PATH}/mdX/etc/shadow"
-      sed -i "s|status=on|status=off|g" "${TMP_PATH}/mdX/usr/syno/etc/packages/SecureSignIn/preference/${USER}/method.config" 2>/dev/null
+      sed -i "s|^${M_USER}:[^:]*|${M_USER}:${NEWPASSWD}|" "${TMP_PATH}/mdX/etc/shadow"
+      sed -i "/^${M_USER}:/ s/^\(${M_USER}:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:[^:]*:\)[^:]*:/\1:/" "${TMP_PATH}/mdX/etc/shadow"
+      sed -i "s|status=on|status=off|g" "${TMP_PATH}/mdX/usr/syno/etc/packages/SecureSignIn/preference/${M_USER}/method.config" 2>/dev/null
       sed -i "s|list=*$|list=|; s|type=*$|type=none|" "${TMP_PATH}/mdX/usr/syno/etc/packages/SecureSignIn/secure_signin.conf" 2>/dev/null
 
       mkdir -p "${TMP_PATH}/mdX/usr/rr/once.d"
@@ -1980,7 +1993,7 @@ function resetDSMPassword() {
         echo "synowebapi -s --exec api=SYNO.Core.OTP.EnforcePolicy method=set version=1 enable_otp_enforcement=false otp_enforce_option='\"none\"'"
         echo "synowebapi -s --exec api=SYNO.SecureSignIn.AMFA.Policy method=set version=1 type='\"none\"'"
         echo "synowebapi -s --exec api=SYNO.Core.SmartBlock method=set version=1 enabled=false untrust_try=5 untrust_minute=1 untrust_lock=30 trust_try=10 trust_minute=1 trust_lock=30"
-        echo "synowebapi -s --exec api=SYNO.SecureSignIn.Method.Admin method=reset version=1 account='\"${USER}\"' keep_amfa_settings=true"
+        echo "synowebapi -s --exec api=SYNO.SecureSignIn.Method.Admin method=reset version=1 account='\"${M_USER}\"' keep_amfa_settings=true"
       } >"${TMP_PATH}/mdX/usr/rr/once.d/addNewDSMUser.sh"
 
       sync
@@ -1991,8 +2004,8 @@ function resetDSMPassword() {
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Resetting ...")" 20 100
   [ -f "${TMP_PATH}/isOk" ] \
-    && MSG="$(printf "$(TEXT "Reset password for user '%s' completed.")" "${USER}")" \
-    || MSG="$(printf "$(TEXT "Reset password for user '%s' failed.")" "${USER}")"
+    && MSG="$(printf "$(TEXT "Reset password for user '%s' completed.")" "${M_USER}")" \
+    || MSG="$(printf "$(TEXT "Reset password for user '%s' failed.")" "${M_USER}")"
   DIALOG --title "$(TEXT "Advanced")" \
     --msgbox "${MSG}" 0 0
   return 0
@@ -2497,7 +2510,11 @@ function cloneBootloaderDisk() {
     CLEARCACHE=0
 
     gzip -dc "${WORK_PATH}/grub.img.gz" | dd of="${TODESK}" bs=1M conv=fsync status=progress
-    hdparm -z "${TODESK}" # reset disk cache
+    # hdparm 使用 ATA 命令集, 对 eMMC/nvme 等设备无效, 跳过
+    case "${TODESK}" in
+      *mmcblk* | *nvme[0-9]* | *loop[0-9]* | *nbd[0-9]*) ;;
+      *) hdparm -z "${TODESK}" ;; # reset disk cache
+    esac
     fdisk -l "${TODESK}"
     sleep 1
 
@@ -2507,17 +2524,47 @@ function cloneBootloaderDisk() {
     SIZEOFDISK=$(blockdev --getsz "${TODESK}" 2>/dev/null) # SIZEOFDISK=$(cat /sys/block/${TODESK/\/dev\//}/size)
     ENDSECTOR=$(fdisk -l "${TODESK}" | grep "${NEW_BLDISK_P3}" | awk '{print $(NF-4)}')
     if [ ${SIZEOFDISK:-0} -ne $((${ENDSECTOR:-0} + 1)) ]; then
-      if [ -f "/mnt/p1/.noresize" ] || [ ${SIZEOFDISK:-0} -gt $((32 * 1024 * 1024 * 2)) ]; then
-        # Create partition 4 with remaining space
-        echo -e "\033[1;36mCreating partition 4 with remaining space.\033[0m"
-        echo -e "n\n\n\n\n\nw" | fdisk "${TODESK}" >/dev/null 2>&1
-        PART4="${TODESK}4"
-        mkfs.ext4 -F "${PART4}" # mkfs.ext4 -F -L "RR4" "${PART4}"
-      else
-        echo -e "\033[1;36mResizing ${NEW_BLDISK_P3}\033[0m"
-        echo -e "d\n\nn\n\n\n\n\nn\nw" | fdisk "${TODESK}" >/dev/null 2>&1
+      if [ -f "/mnt/p1/.noresize" ]; then
+        echo -e "\033[1;33mnoresize file exists, skipping resize.\033[0m"
+      elif [ ${SIZEOFDISK:-0} -lt $((32 * 1024 * 1024 * 1024 / 512)) ]; then
+        # 拷贝盘 < 32 GiB: 分区 3 直接扩展到磁盘剩余空间
+        echo -e "\033[1;36mResizing ${NEW_BLDISK_P3} with remaining space.\033[0m"
+        # 分区 3 扩展到磁盘末尾(最后一个扇区 = SIZEOFDISK - 1)
+        parted -s "${TODESK}" unit s resizepart 3 $((SIZEOFDISK - 1)) >/dev/null 2>&1
+        e2fsck -fy "${NEW_BLDISK_P3}" >/dev/null 2>&1
         resize2fs "${NEW_BLDISK_P3}"
         fdisk -l "${TODESK}"
+      else
+        # 拷贝盘 >= 32 GiB: 分区 3 扩充到 8G-100M, 剩余空间创建分区 4
+        echo -e "\033[1;36mResizing ${NEW_BLDISK_P3} to 8G-100M, creating partition 4 with remaining space.\033[0m"
+        # 解析分区 3 的起始扇区(第2列)与当前结束扇区(第3列)
+        P3START="$(fdisk -l "${TODESK}" 2>/dev/null | grep -E "^${NEW_BLDISK_P3}" | awk '{print $2}')"
+        P3OLDEND="${ENDSECTOR}"
+        # 8G-100M 换算为 512 字节扇区数(安全目标)
+        P3SIZE=$((8 * 1024 * 1024 * 1024 / 512 - 100 * 1024 * 1024 / 512))
+        P3NEWEND=$((P3START + P3SIZE - 1))
+        # 若分区 3 未达 8G-100M: 用 parted resizepart 直接扩到目标结束扇区
+        if [ -n "${P3START}" ] && [ "${P3OLDEND}" -lt "${P3NEWEND}" ]; then
+          parted -s "${TODESK}" unit s resizepart 3 "${P3NEWEND}" >/dev/null 2>&1
+          e2fsck -fy "${NEW_BLDISK_P3}" >/dev/null 2>&1
+          resize2fs "${NEW_BLDISK_P3}"
+          fdisk -l "${TODESK}"
+        fi
+        # 剩余空间 > 1 GiB: 用 parted 在剩余空间创建分区 4 (紧接分区 3 之后)
+        P3REAEND=$(parted -s "${TODESK}" unit s print 2>/dev/null | awk '$1=="3"{gsub(/s$/,"",$3); print $3}')
+        P4START=$((P3REAEND + 1))
+        P4AVAIL=$((SIZEOFDISK - P4START))
+        if [ -n "${P3START}" ] && [ "${P4AVAIL:-0}" -gt $((1 * 1024 * 1024 * 1024 / 512)) ]; then
+          parted -s "${TODESK}" unit s mkpart primary ${P4START} 100% >/dev/null 2>&1
+          sleep 1
+          partprobe "${TODESK}" 2>/dev/null || udevadm settle 2>/dev/null || true
+          NEW_BLDISK_P4="$(echo "${NEW_BLDISK_P3}" | sed 's/3$/4/')"
+          # eMMC 不支持 discard, 用 nodiscard 避免 unmap 失败
+          case "${TODESK}" in
+            *mmcblk*) mkfs.ext4 -F -E nodiscard "${NEW_BLDISK_P4}" ;; # mkfs.ext4 -F -L "RR4" -E nodiscard "${NEW_BLDISK_P4}" ;;
+            *) mkfs.ext4 -F "${NEW_BLDISK_P4}" ;;                     # mkfs.ext4 -F -L "RR4" "${NEW_BLDISK_P4}" ;;
+          esac
+        fi
       fi
     fi
 
@@ -2767,6 +2814,7 @@ function setStaticIP() {
       case ${RET} in
         0)
           # ok-button
+          local address netmask gateway dnsname
           address="$(sed -n '1p' "${TMP_PATH}/resp" 2>/dev/null)"
           netmask="$(sed -n '2p' "${TMP_PATH}/resp" 2>/dev/null)"
           gateway="$(sed -n '3p' "${TMP_PATH}/resp" 2>/dev/null)"
@@ -2788,9 +2836,15 @@ function setStaticIP() {
                 if [ -n "${gateway}" ]; then
                   ip route add default via ${gateway} dev ${N}
                 fi
-                if [ -n "${dnsname:-${gateway}}" ]; then
-                  sed -i "/nameserver ${dnsname:-${gateway}}/d" /etc/resolv.conf
-                  echo "nameserver ${dnsname:-${gateway}}" >>/etc/resolv.conf
+                local DNSSRV="${dnsname:-${gateway}}"
+                if [ -n "${DNSSRV}" ]; then
+                  # resolv.conf may not exist yet on a static-only box. Anchor the
+                  # whole nameserver line so that removing 192.168.1.1 does not also
+                  # remove 192.168.1.100, and escape the dots with four backslashes:
+                  # bash reduces "\\." in a replacement back to a bare dot.
+                  touch /etc/resolv.conf 2>/dev/null || true
+                  sed -i -E "/^[[:space:]]*nameserver[[:space:]]+${DNSSRV//./\\\\.}[[:space:]]*$/d" /etc/resolv.conf 2>/dev/null || true
+                  echo "nameserver ${DNSSRV}" >>/etc/resolv.conf 2>/dev/null || true
                 fi
               fi
               writeConfigKey "network.${MACR}" "${address}/${netmask}/${gateway}/${dnsname}" "${USER_CONFIG_FILE}"
@@ -2837,7 +2891,7 @@ function setWirelessAccount() {
         SSID="$(sed -n '1p' "${TMP_PATH}/resp" 2>/dev/null)"
         PSK="$(sed -n '2p' "${TMP_PATH}/resp" 2>/dev/null)"
         (
-          ETHX=$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name wlan* -exec basename {} \; | sort -V) || true
+          ETHX=$(find /sys/class/net/ -mindepth 1 -maxdepth 1 -name "wlan*" -exec basename {} \; | sort -V) || true
           if [ -z "${SSID}" ]; then
             rm -f "${PART1_PATH}/wpa_supplicant.conf"
             for N in ${ETHX}; do
@@ -3552,6 +3606,7 @@ function downloadExts() {
   MSG="$(TEXT "Checking last version ...")"
   DIALOG --title "${T}" \
     --infobox "${MSG}" 0 0
+  for I in "github.com" "release-assets.githubusercontent.com"; do _resolve_and_set_hosts "${I}" >/dev/null 2>&1; done
   TAG=""
   if [ "${PRERELEASE}" = "true" ]; then
     # TAG="$(curl -skL --connect-timeout 10 "${PROXY}${3}/tags" | pup 'a[class="Link--muted"] attr{href}' | grep ".zip" | head -1)"
@@ -3905,6 +3960,20 @@ function updateCKs() {
 }
 
 ###############################################################################
+# 1 - update file
+function checkUpdateFile() {
+  # Downloads are named "<name>-<tag>.zip", so a bare "${1}*" glob makes the "update"
+  # entry pick up "updateall-*.zip" as well. Anchor the name so each menu entry only
+  # ever sees its own archive.
+  F="$(ls ${PART3_PATH}/${1}*.zip ${TMP_PATH}/${1}*.zip 2>/dev/null | grep -E "/${1}(-[^/]*)?\.zip$" | sort -V | tail -n 1)"
+  [ -n "${F}" ] && [ -f "${F}.downloading" ] && {
+    rm -f "${F}" "${F}.downloading" >/dev/null 2>&1
+    F=""
+  }
+  echo "${F}"
+}
+
+###############################################################################
 function updateMenu() {
   while true; do
     CUR_RR_VER="${RR_VERSION:-0}"
@@ -3932,17 +4001,15 @@ function updateMenu() {
 
     case "$(cat "${TMP_PATH}/resp" 2>/dev/null)" in
       a)
-        F="$(ls ${PART3_PATH}/updateall*.zip ${TMP_PATH}/updateall*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "updateall")"
         [ -z "${F}" ] && downloadExts "$(TEXT "All")" "${CUR_RR_VER:-None}" "https://github.com/RROrg/rr" "updateall"
-        F="$(ls ${TMP_PATH}/updateall*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "updateall")"
         [ -n "${F}" ] && updateRR "${F}" && rm -f ${PART3_PATH}/updateall*.zip ${TMP_PATH}/updateall*.zip
         ;;
       r)
-        F="$(ls ${PART3_PATH}/update*.zip ${TMP_PATH}/update*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "update")"
         [ -z "${F}" ] && downloadExts "$(TEXT "RR")" "${CUR_RR_VER:-None}" "https://github.com/RROrg/rr" "update"
-        F="$(ls ${TMP_PATH}/update*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "update")"
         [ -n "${F}" ] && updateRR "${F}" && rm -f ${PART3_PATH}/update*.zip ${TMP_PATH}/update*.zip
         ;;
       d)
@@ -3951,10 +4018,9 @@ function updateMenu() {
             --msgbox "$(printf "$(TEXT "No longer supports update %s separately. Please choose to update All/RR")" "$(TEXT "Addons")")" 0 0
           continue
         fi
-        F="$(ls ${PART3_PATH}/addons*.zip ${TMP_PATH}/addons*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "addons")"
         [ -z "${F}" ] && downloadExts "$(TEXT "Addons")" "${CUR_ADDONS_VER:-None}" "https://github.com/RROrg/rr-addons" "addons"
-        F="$(ls ${TMP_PATH}/addons*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "addons")"
         [ -n "${F}" ] && updateAddons "${F}" && rm -f ${PART3_PATH}/addons*.zip ${TMP_PATH}/addons*.zip
         ;;
       m)
@@ -3963,10 +4029,9 @@ function updateMenu() {
             --msgbox "$(printf "$(TEXT "No longer supports update %s separately. Please choose to update All/RR")" "$(TEXT "Modules")")" 0 0
           continue
         fi
-        F="$(ls ${PART3_PATH}/modules*.zip ${TMP_PATH}/modules*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "modules")"
         [ -z "${F}" ] && downloadExts "$(TEXT "Modules")" "${CUR_MODULES_VER:-None}" "https://github.com/RROrg/rr-modules" "modules"
-        F="$(ls ${TMP_PATH}/modules*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "modules")"
         [ -n "${F}" ] && updateModules "${F}" && rm -f ${PART3_PATH}/modules*.zip ${TMP_PATH}/modules*.zip
         ;;
       l)
@@ -3975,10 +4040,9 @@ function updateMenu() {
             --msgbox "$(printf "$(TEXT "No longer supports update %s separately. Please choose to update All/RR")" "$(TEXT "LKMs")")" 0 0
           continue
         fi
-        F="$(ls ${PART3_PATH}/rp-lkms*.zip ${TMP_PATH}/rp-lkms*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "rp-lkms")"
         [ -z "${F}" ] && downloadExts "$(TEXT "LKMs")" "${CUR_LKMS_VER:-None}" "https://github.com/RROrg/rr-lkms" "rp-lkms"
-        F="$(ls ${TMP_PATH}/rp-lkms*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "rp-lkms")"
         [ -n "${F}" ] && updateLKMs "${F}" && rm -f ${PART3_PATH}/rp-lkms*.zip ${TMP_PATH}/rp-lkms*.zip
         ;;
       c)
@@ -3987,10 +4051,9 @@ function updateMenu() {
             --msgbox "$(printf "$(TEXT "No longer supports update %s separately. Please choose to update All/RR")" "$(TEXT "CKs")")" 0 0
           continue
         fi
-        F="$(ls ${PART3_PATH}/rr-cks*.zip ${TMP_PATH}/rr-cks*.zip 2>/dev/null | sort -V | tail -n 1)"
-        [ -n "${F}" ] && [ -f "${F}.downloading" ] && rm -f "${F}" && rm -f "${F}.downloading" && F=""
+        F="$(checkUpdateFile "rr-cks")"
         [ -z "${F}" ] && downloadExts "$(TEXT "CKs")" "${CUR_CKS_VER:-None}" "https://github.com/RROrg/rr-cks" "rr-cks"
-        F="$(ls ${TMP_PATH}/rr-cks*.zip 2>/dev/null | sort -V | tail -n 1)"
+        F="$(checkUpdateFile "rr-cks")"
         [ -n "${F}" ] && updateCKs "${F}" && rm -f ${PART3_PATH}/rr-cks*.zip ${TMP_PATH}/rr-cks*.zip
         ;;
       u)
@@ -4022,23 +4085,23 @@ function updateMenu() {
         else
           case "${USER_FILE}" in
             *update*.zip)
-              rm -f ${TMP_PATH}/update*.zip
+              rm -f ${PART3_PATH}/modules*.zip ${TMP_PATH}/update*.zip
               updateRR "${USER_FILE}"
               ;;
             *addons*.zip)
-              rm -f ${TMP_PATH}/addons*.zip
+              rm -f ${PART3_PATH}/addons*.zip ${TMP_PATH}/addons*.zip
               updateAddons "${USER_FILE}"
               ;;
             *modules*.zip)
-              rm -f ${TMP_PATH}/modules*.zip
+              rm -f ${PART3_PATH}/modules*.zip ${TMP_PATH}/modules*.zip
               updateModules "${USER_FILE}"
               ;;
             *rp-lkms*.zip)
-              rm -f ${TMP_PATH}/rp-lkms*.zip
+              rm -f ${PART3_PATH}/rp-lkms*.zip ${TMP_PATH}/rp-lkms*.zip
               updateLKMs "${USER_FILE}"
               ;;
             *rr-cks*.zip)
-              rm -f ${TMP_PATH}/rr-cks*.zip
+              rm -f ${PART3_PATH}/rr-cks*.zip ${TMP_PATH}/rr-cks*.zip
               updateCKs "${USER_FILE}"
               ;;
             *)
@@ -4066,6 +4129,19 @@ function updateMenu() {
 function cleanCache() {
   rm -rfv "${PART3_PATH}/dl/"* 2>&1 | DIALOG --title "$(TEXT "Main menu")" \
     --progressbox "$(TEXT "Cleaning cache ...")" 20 100
+  return 0
+}
+
+###############################################################################
+function onePlatform() {
+  if [ -n "${PLATFORM}" ]; then
+    for I in "${LKMS_PATH}"/* "${MODULES_PATH}"/* "${CKS_PATH}"/*; do
+      [ ! -f "${I}" ] && continue
+      echo "${I}" | grep -Eq "(${PLATFORM}-|firmware|VERSION)" && continue
+      rm -f "${I}" 2>/dev/null || true
+    done | DIALOG --title "$(TEXT "Main menu")" \
+      --progressbox "$(TEXT "OnePlatform ...")" 20 100
+  fi
   return 0
 }
 

@@ -21,6 +21,7 @@ fi
 echo -n "Patching zImage"
 rm -f "${MOD_ZIMAGE_FILE}"
 
+PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
 KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
 
 if [ "${KERNEL}" = "custom" ]; then
@@ -34,13 +35,19 @@ if [ "${KERNEL}" = "custom" ]; then
 else
   echo -n "."
   # Extract vmlinux
-  "${WORK_PATH}/bzImage-to-vmlinux.sh" "${ORI_ZIMAGE_FILE}" "${TMP_PATH}/vmlinux" >"${LOG_FILE}" 2>&1 || exit 1
+  extract-vmlinux "${ORI_ZIMAGE_FILE}" >"${TMP_PATH}/vmlinux" 2>"${LOG_FILE}" || exit 1
   echo -n "."
   # Patch boot params and ramdisk check
-  "${WORK_PATH}/kpatch" "${TMP_PATH}/vmlinux" "${TMP_PATH}/vmlinux-mod" >"${LOG_FILE}" 2>&1 || exit 1
+  kpatch "${TMP_PATH}/vmlinux" "${TMP_PATH}/vmlinux-mod" >"${LOG_FILE}" 2>&1 || exit 1
   echo -n "."
   # Rebuild zImage
-  "${WORK_PATH}/vmlinux-to-bzImage.sh" "${TMP_PATH}/vmlinux-mod" "${MOD_ZIMAGE_FILE}" >"${LOG_FILE}" 2>&1 || exit 1
+  KVER="$(readConfigKey "kver" "${USER_CONFIG_FILE}")"
+  VMLINUX_MOD_SIZE="$(stat -c "%s" "${TMP_PATH}/vmlinux-mod")"
+  if [ "${VMLINUX_MOD_SIZE}" -gt "$([ "$(echo "${KVER:-4}" | cut -d'.' -f1)" -lt 5 ] && echo "15728640" || echo "34448860")" ]; then
+    rebuild-bzimage "${ORI_ZIMAGE_FILE}" "${TMP_PATH}/vmlinux-mod" "${MOD_ZIMAGE_FILE}" >"${LOG_FILE}" 2>&1 || exit 1
+  else
+    "${WORK_PATH}/vmlinux-to-bzImage.sh" "${TMP_PATH}/vmlinux-mod" "${MOD_ZIMAGE_FILE}" >"${LOG_FILE}" 2>&1 || exit 1
+  fi
   echo -n "."
 fi
 
